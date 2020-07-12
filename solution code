@@ -1,0 +1,161 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Dec 13 09:39:29 2019
+
+@author: Ruan
+"""
+
+#import matplotlib.pyplot as plt
+import librosa
+import librosa.display
+import numpy as np
+from audio import BarkBand
+from sklearn.decomposition import NMF
+#import sys
+#sys.path.append(r'nmf_fixed.py')
+#import nmf_fixed
+from sklearn.decomposition import NMF_fixed
+#sys.path.append(r'nmf_fixed_Hn.py')
+#from sklearn.decomposition import NMF_fixed_hn
+from sklearn.decomposition import NMF_fixed1
+
+
+barkband = BarkBand(16000,256)
+barkmat  = barkband.mat_back.T       #滤波矩阵
+bark_back= np.linalg.pinv(barkmat)   #广义逆矩阵
+
+
+# 1.读取wav文件，这里是白噪音；采样频率为sr。
+wav1_matrix= np.load('01.npy')[:450000]
+wav1=librosa.output.write_wav('01_1.wav',wav1_matrix,sr=16000)
+
+wav2_matrix=np.load('jiao.npy')[:450000]
+#wav2,sr= librosa.load('jiao.mp3',sr=16000)
+wav2=librosa.output.write_wav('jiao_1.wav',wav2_matrix,sr=16000)
+
+
+# 2.画噪音波形图，频谱图
+
+'''
+fig=plt.figure(num='频谱图',linewidth=1)
+axes=fig.add_axes([0,10000],projection='rectilinear',title="original noise wavform",xlabel='time',ylabel='frequency', ymargin=-0.2)
+librosa.display.waveplot(wav2, sr=16000)
+plt.title('original noise wavform')
+fig.show(warn=False)
+plt.show()
+
+Xdb = librosa.amplitude_to_db(librosa.stft(wav1_matrix),ref=np.max)
+plt.figure(figsize=(15, 5))
+librosa.display.specshow(Xdb, sr=16000, x_axis='time', y_axis='hz')
+plt.colorbar(format='%+2.0f dB')
+plt.title('noise power spectrogram wavform')
+'''
+
+# 3.NMF算法实现
+
+wav3=np.abs(librosa.stft(wav1_matrix,n_fft=256)).T 
+
+wav4=np.abs(librosa.stft(wav2_matrix,n_fft=256)).T
+
+wav3 = np.dot(wav3, barkmat)
+wav4 = np.dot(wav4, barkmat)
+
+nmf = NMF(n_components=5,init=None,solver='cd',  # 'cd' | 'mu'
+          beta_loss='frobenius',#范数
+          max_iter=1000,  # 最大迭代次数
+          random_state=None,  alpha=0.,l1_ratio=0.,  # 正则化参数
+          verbose=0, shuffle=False  # 针对"cd solver"
+          )
+print('params:', nmf.get_params())
+
+# 下面四个函数最核心; H=nmf.components_ ,分解矩阵，也被称为‘字典dictionary’
+W_s = nmf.fit_transform(wav3)
+np.save('W_s.npy',W_s)
+nmfout_s= nmf.inverse_transform(W_s)
+
+
+W_n = nmf.fit_transform(wav4)
+H_n=nmf.components_
+np.save('W_n.npy',W_n)
+nmfout_n = nmf.inverse_transform(W_n)
+
+''' 
+求联合字典/矩阵合并,意义不大；
+W_joint=np.concatenate((W_s,W_n),axis=0)
+'''
+
+
+#4.增强阶段:含噪语音Y;  对不同长度的音频对齐补位
+
+Y_original=wav1_matrix[:450000]+wav2_matrix[:450000]  #加性噪音
+Y=np.abs(librosa.stft(Y_original, n_fft=256)).T
+A=np.angle(librosa.stft(Y_original, n_fft=256))
+
+# ================================ 
+# 分别固定W_s和W_n求对应激活矩阵H
+
+nmf_fixed = NMF_fixed(n_components=5,init=None,solver='cd',  # 'cd' | 'mu'
+          beta_loss='frobenius',#范数
+          max_iter=1000,  # 最大迭代次数
+          random_state=None,  alpha=0.,l1_ratio=0.,  # 正则化参数
+          verbose=0, shuffle=False  # 针对"cd solver"
+          )
+Yt=np.dot(Y,barkmat)   #三角滤波矩阵，目的是缩小矩阵规模
+
+W_mixed_s=nmf_fixed.fit_transform(Yt)
+H_mixed_s=nmf_fixed.components_
+
+
+
+nmf_fixed_Hn = NMF_fixed1(n_components=5,init=None,solver='cd',  # 'cd' | 'mu'
+          beta_loss='frobenius',#范数
+          max_iter=1000,  # 最大迭代次数
+          random_state=None,  alpha=0.,l1_ratio=0.,  # 正则化参数
+          verbose=0, shuffle=False  # 针对"cd solver"
+          )
+Yhn=np.dot(Y,barkmat)  
+
+W_mixed_n=nmf_fixed_Hn.fit_transform(Yhn)
+H_mixed_n=nmf_fixed_Hn.components_
+
+
+
+#5.增益函数G
+G=np.dot(W_s,H_mixed_s)/(np.dot(W_s,H_mixed_s)+np.dot(W_n,H_mixed_n))
+G=np.dot(G,bark_back)
+S=(G*Y).T*np.exp(1j*np.angle(librosa.stft(Y_original,n_fft=256))) #相位和幅度叠加
+ #逆矩阵变换回去
+
+
+#6.短时傅里叶逆变换 istft,频谱变矩阵
+reversed_wav=librosa.istft(S)
+
+
+#7.输出降噪音频
+librosa.output.write_wav('NMF_output.wav', reversed_wav[:200000], sr=16000)
+
+librosa.output.write_wav('Y_output.wav', Y_original, sr=16000)
+
+
+
+'''
+#画波形图，频谱图
+plt.figure()
+librosa.display.waveplot(reversed_wav[:150000], sr=sr)
+plt.title('NMF_output wavform')
+plt.show()
+
+Xdb = librosa.amplitude_to_db(reversed_wav[:150000],ref=np.max)
+plt.figure(figsize=(15, 5))
+librosa.display.specshow(Xdb, sr=sr, x_axis='time', y_axis='hz')
+plt.colorbar(format='%+2.0f dB')
+plt.title('NMF output power spectrogram wavform')
+
+
+
+# -----------------属性------------------------
+
+#print('reconstruction_err_', nmf.reconstruction_err_)  # 损失函数值
+#print('n_iter_', nmf.n_iter_)  
+
+'''
